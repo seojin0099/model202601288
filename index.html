@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>참참참 게임</title>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@latest/dist/tf.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@teachablemachine/image@latest/dist/teachablemachine-image.min.js"></script>
+  <style>
+    :root { --navy:#172554; --blue:#2563eb; --sky:#dbeafe; --ink:#172033; }
+    * { box-sizing:border-box; }
+    body {
+      margin:0; min-height:100vh; padding:28px 16px; display:flex; justify-content:center; align-items:center;
+      font-family:system-ui,-apple-system,"Noto Sans KR",sans-serif; color:var(--ink);
+      background:radial-gradient(circle at top,#eff6ff 0,#dbeafe 38%,#c7d2fe 100%);
+    }
+    .app { width:min(100%,760px); background:#fff; border-radius:28px; padding:clamp(20px,4vw,38px);
+      box-shadow:0 22px 70px #1e3a8a24; text-align:center; }
+    h1 { margin:0; font-size:clamp(34px,7vw,54px); color:var(--navy); letter-spacing:-2px; }
+    .sub { color:#64748b; margin:8px 0 24px; }
+    .stage { display:grid; grid-template-columns:1fr 1fr; gap:14px; margin:20px 0; }
+    .panel { background:#f8fafc; border:1px solid #e2e8f0; border-radius:20px; padding:16px; min-width:0; }
+    .panel h2 { font-size:16px; margin:0 0 12px; color:#475569; }
+    video { width:100%; aspect-ratio:4/3; object-fit:cover; border-radius:14px; background:#0f172a; transform:scaleX(-1); }
+    .gesture { min-height:120px; display:flex; align-items:center; justify-content:center; font-size:clamp(42px,9vw,68px); font-weight:800; color:var(--blue); }
+    .gesture small { display:block; font-size:14px; color:#64748b; font-weight:500; margin-top:6px; }
+    .result { margin:18px 0; min-height:76px; border-radius:18px; background:#eff6ff; padding:16px; display:flex; align-items:center; justify-content:center; flex-direction:column; }
+    #resultTitle { font-size:25px; font-weight:900; color:var(--navy); }
+    #resultText { color:#64748b; font-size:14px; margin-top:4px; }
+    .controls { display:flex; gap:10px; justify-content:center; flex-wrap:wrap; margin-top:16px; }
+    button { border:0; border-radius:999px; padding:14px 24px; font-size:16px; font-weight:800; cursor:pointer; }
+    button:disabled { opacity:.45; cursor:not-allowed; }
+    .primary { background:var(--blue); color:#fff; }
+    .secondary { background:#e2e8f0; color:#334155; }
+    .score { display:flex; justify-content:center; gap:28px; margin:16px 0 4px; color:#475569; }
+    .score b { display:block; font-size:26px; color:var(--navy); }
+    .hint { font-size:13px; line-height:1.6; color:#64748b; margin:18px 0 0; }
+    #status { font-size:13px; color:#64748b; min-height:20px; margin-top:10px; }
+    @media(max-width:520px) { .stage { grid-template-columns:1fr; } .gesture { min-height:78px; } }
+  </style>
+</head>
+<body>
+  <main class="app">
+    <h1>참참참!</h1>
+    <p class="sub">카메라에 손 모양을 보여주고 컴퓨터와 대결해 보세요.</p>
+
+    <div class="stage">
+      <section class="panel">
+        <h2>내 손동작</h2>
+        <video id="camera" autoplay playsinline muted></video>
+        <div id="myGesture" class="gesture">✋<small>카메라를 시작해 주세요</small></div>
+      </section>
+      <section class="panel">
+        <h2>컴퓨터 방향</h2>
+        <div id="cpuGesture" class="gesture">❔<small>대결을 시작하면 공개됩니다</small></div>
+      </section>
+    </div>
+
+    <div class="result" aria-live="polite">
+      <div id="resultTitle">준비되셨나요?</div>
+      <div id="resultText">왼쪽 · 정면 · 오른쪽 손 모양을 인식합니다.</div>
+    </div>
+
+    <div class="score">
+      <div>내 승리<b id="wins">0</b></div>
+      <div>컴퓨터 승리<b id="losses">0</b></div>
+      <div>무승부<b id="draws">0</b></div>
+    </div>
+
+    <div class="controls">
+      <button id="startCamera" class="primary">카메라 시작</button>
+      <button id="play" class="primary" disabled>참참참 시작!</button>
+      <button id="reset" class="secondary">점수 초기화</button>
+    </div>
+    <div id="status">모델을 불러오는 중입니다...</div>
+    <p class="hint">
+      게임 방법: 카메라에 손 모양을 보여주세요. 인식된 방향과 컴퓨터가 낸 방향이 같으면 내가 승리합니다.<br>
+      카메라 권한을 허용하고, 밝은 곳에서 손을 화면 중앙에 보여주시면 더 잘 인식됩니다.
+    </p>
+  </main>
+
+<script>
+  // GitHub 저장소에 model.json, metadata.json, weights.bin을 index.html과 함께 올려주세요.
+  const MODEL_URL = "./model.json";
+  const METADATA_URL = "./metadata.json";
+  const DIRECTIONS = ["왼쪽", "정면", "오른쪽"];
+  const ARROWS = { "왼쪽":"⬅️", "정면":"⬆️", "오른쪽":"➡️" };
+
+  let model = null;
+  let cameraStream = null;
+  let latestDirection = null;
+  let latestConfidence = 0;
+  let predictionLoop = false;
+  let busy = false;
+  let score = { wins:0, losses:0, draws:0 };
+
+  const $ = id => document.getElementById(id);
+  const video = $("camera");
+
+  async function loadModel() {
+    try {
+      model = await tmImage.load(MODEL_URL, METADATA_URL);
+      $("status").textContent = "AI 손동작 모델을 불러왔습니다. 카메라를 시작해 주세요.";
+      $("startCamera").disabled = false;
+    } catch (error) {
+      console.error(error);
+      $("status").textContent = "모델을 불러오지 못했습니다. model.json, metadata.json, weights.bin 파일이 같은 폴더에 있는지 확인해 주세요.";
+      $("startCamera").disabled = true;
+    }
+  }
+
+  async function startCamera() {
+    try {
+      $("startCamera").disabled = true;
+      $("status").textContent = "카메라 연결 중...";
+      cameraStream = await navigator.mediaDevices.getUserMedia({
+        audio:false, video:{ facingMode:"user", width:{ideal:640}, height:{ideal:480} }
+      });
+      video.srcObject = cameraStream;
+      await new Promise(resolve => video.onloadedmetadata = resolve);
+      await video.play();
+      $("status").textContent = "카메라가 켜졌습니다. 손을 화면 중앙에 보여주세요.";
+      $("play").disabled = false;
+      if (!predictionLoop) predictContinuously();
+    } catch (error) {
+      console.error(error);
+      $("status").textContent = "카메라를 켤 수 없습니다. 브라우저 주소창 왼쪽의 사이트 설정에서 카메라를 허용하고 HTTPS 주소로 접속해 주세요.";
+      $("startCamera").disabled = false;
+    }
+  }
+
+  async function predictContinuously() {
+    predictionLoop = true;
+    while (predictionLoop) {
+      if (model && video.readyState >= 2 && !busy) {
+        try {
+          const predictions = await model.predict(video);
+          predictions.sort((a,b) => b.probability - a.probability);
+          const top = predictions[0];
+          if (top && DIRECTIONS.includes(top.className) && top.probability >= 0.65) {
+            latestDirection = top.className;
+            latestConfidence = top.probability;
+            $("myGesture").innerHTML = `${ARROWS[latestDirection]}<small>${latestDirection} · ${(latestConfidence*100).toFixed(0)}%</small>`;
+          } else {
+            latestDirection = null;
+            $("myGesture").innerHTML = `✋<small>손 모양을 인식하는 중...</small>`;
+          }
+        } catch (e) { console.error(e); }
+      }
+      await new Promise(resolve => setTimeout(resolve, 120));
+    }
+  }
+
+  async function playRound() {
+    if (busy) return;
+    if (!latestDirection) {
+      $("resultTitle").textContent = "손 모양을 먼저 보여주세요!";
+      $("resultText").textContent = "왼쪽, 정면, 오른쪽 중 하나가 인식되어야 합니다.";
+      return;
+    }
+    busy = true;
+    $("play").disabled = true;
+    const myPick = latestDirection;
+    $("resultTitle").textContent = "참! 참! 참!";
+    $("resultText").textContent = "컴퓨터가 방향을 정하고 있습니다...";
+    $("cpuGesture").innerHTML = "❔<small>잠시만요!</small>";
+
+    await new Promise(resolve => setTimeout(resolve, 650));
+    const cpuPick = DIRECTIONS[Math.floor(Math.random()*DIRECTIONS.length)];
+    $("cpuGesture").innerHTML = `${ARROWS[cpuPick]}<small>${cpuPick}</small>`;
+
+    if (myPick === cpuPick) {
+      score.wins++;
+      $("resultTitle").textContent = "🎉 내가 이겼어요!";
+      $("resultText").textContent = `내 방향 ${myPick} · 컴퓨터 방향 ${cpuPick}`;
+    } else {
+      score.losses++;
+      $("resultTitle").textContent = "아쉬워요! 컴퓨터 승리";
+      $("resultText").textContent = `내 방향 ${myPick} · 컴퓨터 방향 ${cpuPick}`;
+    }
+    updateScore();
+    busy = false;
+    $("play").disabled = false;
+  }
+
+  function updateScore() {
+    $("wins").textContent = score.wins;
+    $("losses").textContent = score.losses;
+    $("draws").textContent = score.draws;
+  }
+
+  $("startCamera").addEventListener("click", startCamera);
+  $("play").addEventListener("click", playRound);
+  $("reset").addEventListener("click", () => {
+    score = {wins:0, losses:0, draws:0};
+    updateScore();
+    $("resultTitle").textContent = "점수가 초기화되었습니다.";
+    $("resultText").textContent = "다시 대결해 보세요!";
+  });
+  $("startCamera").disabled = true;
+  loadModel();
+</script>
+</body>
+</html>
